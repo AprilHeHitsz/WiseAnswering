@@ -113,17 +113,13 @@ class RelationExtractor(nn.Module, ABC):
         outputs = self.hidden2rel(outputs)
         return outputs
 
-    def get_top_tail(self, head, question_tokenized, attention_mask):
-        question_embedding = self.getQuestionEmbedding(question_tokenized.unsqueeze(0), attention_mask.unsqueeze(0))
-        rel_embedding = self.applyNonLinear(question_embedding)
-        head = self.embedding(head).unsqueeze(0)
-
+    def get_top_k_tail(self, head, relation, k):
         head = torch.stack(list(torch.chunk(head, 2, dim=1)), dim=1)
         if self.do_batch_norm:
             head = self.bn0(head)
 
         head = self.ent_dropout(head)
-        relation = self.rel_dropout(rel_embedding)
+        relation = self.rel_dropout(relation)
         head = head.permute(1, 0, 2)
         re_head = head[0]
         im_head = head[1]
@@ -131,7 +127,23 @@ class RelationExtractor(nn.Module, ABC):
         re_relation, im_relation = torch.chunk(relation, 2, dim=1)
         re_tail, im_tail = torch.chunk(self.embedding.weight, 2, dim=1)
 
-        return [re_tail, im_tail]
+        re_score = re_head * re_relation - im_head * im_relation
+        im_score = re_head * im_relation + im_head * re_relation
+
+        score = torch.stack([re_score, im_score], dim=1)
+        if self.do_batch_norm:
+            score = self.bn2(score)
+
+        score = self.score_dropout(score)
+        score = score.permute(1, 0, 2)
+
+        re_score = score[0]
+        im_score = score[1]
+        score = torch.mm(re_score, re_tail.transpose(1, 0)) + torch.mm(im_score, im_tail.transpose(1, 0))
+
+        candidates = torch.topk(score, k, largest=True, sorted=True)
+
+        return candidates
 
     def get_score_ranked(self, head, question_tokenized, attention_mask):
         question_embedding = self.getQuestionEmbedding(question_tokenized.unsqueeze(0), attention_mask.unsqueeze(0))
